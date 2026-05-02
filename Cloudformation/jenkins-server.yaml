@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "Capstone: Jenkins Server with Docker, Git, and Java "
+
+Parameters:
+  KeyName:
+    Description: Name of your specific existing EC2 key pair
+    Type: AWS::EC2::KeyPair::KeyName
+    Default: "capstone-keypair"
+
+Resources:
+# CONFIGURING SECURITY GROUP
+  
+  JenkinsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow SSH and Jenkins web access (Global)
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  # Iam role for  EC2 instance
+  JenkinsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+# linking iam role to EC2 instance
+  JenkinsInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref JenkinsRole
+
+ # attached storage to the instace
+  JenkinsInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 30 
+            VolumeType: gp3
+            DeleteOnTermination: true
+            # AMI for EC2 instance
+      ImageId: '{{resolve:ssm:/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2}}'
+      InstanceType: t3.micro
+      KeyName: !Ref KeyName
+      SecurityGroupIds:
+        - !Ref JenkinsSecurityGroup
+      IamInstanceProfile: !Ref JenkinsInstanceProfile
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          # installing pre requisite for jenkins
+          yum install fontconfig dejavu-sans-fonts -y
+
+          dd if=/dev/zero of=/swapfile bs=128M count=16
+          chmod 600 /swapfile
+          mkswap /swapfile
+          swapon /swapfile
+          echo "/swapfile swap swap defaults 0 0" >> /etc/fstab
+
+          # installing pre requisite for java
+          rpm --import https://yum.corretto.aws/corretto.key
+          curl -L -o /etc/yum.repos.d/corretto.repo https://yum.corretto.aws/corretto.repo
+          yum install -y java-21-amazon-corretto-devel
+          
+          wget -O /etc/yum.repos.d/jenkins.repo https://pkg.jenkins.io/redhat-stable/jenkins.repo
+          rpm --import https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+          # installing jenkins and Docker
+          yum install jenkins git -y
+          amazon-linux-extras install docker -y
+          # jenkins folder
+          mkdir -p /etc/systemd/system/jenkins.service.d/
+          cat <<EOF > /etc/systemd/system/jenkins.service.d/override.conf
+          [Service]
+          Environment="JAVA_OPTS=-Xmx512m -Xms256m -Djava.awt.headless=true"
+          TimeoutStartSec=180
+          EOF
+          # adding jenkins to group
+          systemctl start docker
+          systemctl enable docker
+          usermod -a -G docker jenkins
+          
+          # runing system
+          systemctl daemon-reload
+          systemctl start jenkins
+          systemctl enable jenkins
+          systemctl restart jenkins
+      Tags:
+        - Key: Name
+          Value: Capstone-Jenkins-Server
+
+Outputs:
+  JenkinsPublicIP:
+    Description: "Public IP to SSH into the box"
+    Value: !GetAtt JenkinsInstance.PublicIp
+  JenkinsURL:
+    Description: "URL to access the Jenkins Web UI"
+    Value: !Sub "http://${JenkinsInstance.PublicIp}:8080"
+  InitialAdminPasswordCommand:
+    Description: "Run this command via SSH to get your initial Jenkins password"
+    Value: "sudo cat /var/lib/jenkins/secrets/initialAdminPassword"
